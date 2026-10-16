@@ -1,0 +1,58 @@
+import { Request, Response, NextFunction } from "express";
+import jwt from "jsonwebtoken";
+
+export interface AppJwtPayload {
+  app_user_id: string;
+  app_role: "patient" | "doctor" | "admin";
+  wallet_address: string;
+}
+
+/**
+ * Mints the token our own API issues to the browser after a successful
+ * wallet-signature login. This token doubles as the Supabase-compatible
+ * JWT: it's signed with the SAME secret configured as Supabase's custom
+ * JWT secret, and carries `app_user_id` / `app_role` as custom claims that
+ * db/migrations/004_rls_policies.sql reads via auth.jwt(). One token,
+ * two consumers (our API + Supabase RLS) — no separate session store.
+ */
+export function issueAppJwt(payload: AppJwtPayload): string {
+  return jwt.sign(payload, process.env.JWT_SECRET!, {
+    expiresIn: "12h",
+    audience: "authenticated", // required by Supabase's JWT consumers
+  });
+}
+
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace Express {
+    interface Request {
+      auth?: AppJwtPayload;
+      rawJwt?: string;
+    }
+  }
+}
+
+export function requireAuth(req: Request, res: Response, next: NextFunction) {
+  const header = req.headers.authorization;
+  if (!header?.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Missing bearer token" });
+  }
+  const token = header.slice("Bearer ".length);
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as AppJwtPayload;
+    req.auth = decoded;
+    req.rawJwt = token;
+    next();
+  } catch {
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+}
+
+export function requireRole(...roles: Array<AppJwtPayload["app_role"]>) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (!req.auth || !roles.includes(req.auth.app_role)) {
+      return res.status(403).json({ error: "Insufficient role" });
+    }
+    next();
+  };
+}
